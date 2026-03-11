@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>大提琴課作業系統</title>
+  
+  <!-- 載入 React -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <!-- 載入 Babel 以解析 JSX -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- 載入 Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- 載入 Google 登入工具 -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <!-- 載入 FontAwesome 圖示 -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+</head>
+<body class="bg-amber-50">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useRef, useEffect } = React;
+
+    // 填入你的 Client ID
+    const CLIENT_ID = '491110356416-bpscmjfm5g5b6stkdeetrlbpkl5lf04i.apps.googleusercontent.com';
+    const SCOPES = 'https://www.googleapis.com/auth/youtube.upload';
+
+    const initialLessons = [
+      {
+        id: '1',
+        date: '2026-03-11',
+        time: '13:45',
+        title: '大提琴常態課',
+        priorityItems: ['降B大調 / G小調', '課本 p.5 《Gavotte》 G.F.Handel'],
+        otherItems: ['《Canon in D major》（練到32小節）'],
+        videoUrl: 'https://www.youtube.com/embed/2a1EaFwVhhE'
+      }
+    ];
+
+    function App() {
+      const [lessons, setLessons] = useState(initialLessons);
+      const [selectedLessonId, setSelectedLessonId] = useState(initialLessons[0].id);
+      const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+      const [isAdding, setIsAdding] = useState(false);
+
+      const [newDate, setNewDate] = useState('');
+      const [newTime, setNewTime] = useState('13:45');
+      const [newPriority, setNewPriority] = useState('');
+      const [newOther, setNewOther] = useState('');
+      
+      const [videoMethod, setVideoMethod] = useState('link');
+      const [newVideoUrl, setNewVideoUrl] = useState('');
+      const [selectedFile, setSelectedFile] = useState(null);
+      
+      const [isUploading, setIsUploading] = useState(false);
+      const [uploadProgress, setUploadProgress] = useState(0);
+      const [uploadStatusMsg, setUploadStatusMsg] = useState('');
+      const [errorMsg, setErrorMsg] = useState('');
+      
+      const fileInputRef = useRef(null);
+      const tokenClientRef = useRef(null);
+
+      useEffect(() => {
+        // 等待 Google Script 載入完成後初始化
+        const initGoogleAuth = () => {
+          if (window.google && window.google.accounts) {
+            tokenClientRef.current = window.google.accounts.oauth2.initTokenClient({
+              client_id: CLIENT_ID,
+              scope: SCOPES,
+              callback: (tokenResponse) => {
+                if (tokenResponse && tokenResponse.access_token) {
+                  executeYouTubeUpload(tokenResponse.access_token);
+                }
+              },
+            });
+          } else {
+            setTimeout(initGoogleAuth, 500);
+          }
+        };
+        initGoogleAuth();
+      }, []);
+
+      const selectedLesson = lessons.find(l => l.id === selectedLessonId);
+
+      const handleAddLesson = (e) => {
+        e.preventDefault();
+        setErrorMsg('');
+        
+        if (videoMethod === 'upload' && selectedFile) {
+          setUploadStatusMsg('等待 Google 帳號授權...');
+          setIsUploading(true);
+          if(tokenClientRef.current) {
+             tokenClientRef.current.requestAccessToken();
+          } else {
+             setErrorMsg('Google 登入服務尚未準備好，請重新整理網頁。');
+             setIsUploading(false);
+          }
+        } else {
+          let finalVideoUrl = '';
+          if (videoMethod === 'link' && newVideoUrl) {
+            finalVideoUrl = newVideoUrl.includes('watch?v=') 
+              ? newVideoUrl.replace('watch?v=', 'embed/') 
+              : newVideoUrl;
+          }
+          saveLessonToState(finalVideoUrl);
+        }
+      };
+
+      const executeYouTubeUpload = async (accessToken) => {
+        try {
+          setUploadStatusMsg('正在建立 YouTube 影片資料...');
+          setUploadProgress(0);
+
+          const metadata = {
+            snippet: {
+              title: `大提琴課作業示範 - ${newDate}`,
+              description: `這週的作業：\n${newPriority}\n\n其他進度：\n${newOther}`,
+              categoryId: '27'
+            },
+            status: { privacyStatus: 'unlisted' }
+          };
+
+          const initRes = await fetch('https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+              'X-Upload-Content-Length': selectedFile.size.toString(),
+              'X-Upload-Content-Type': selectedFile.type
+            },
+            body: JSON.stringify(metadata)
+          });
+
+          if (!initRes.ok) throw new Error('無法初始化上傳作業，請確認 Google 帳號權限。');
+          const uploadUrl = initRes.headers.get('Location');
+
+          setUploadStatusMsg('影片上傳中，請勿關閉網頁...');
+          const xhr = new XMLHttpRequest();
+          xhr.open('PUT', uploadUrl, true);
+          
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+              setUploadProgress(Math.round((e.loaded / e.total) * 100));
+            }
+          };
+
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              const response = JSON.parse(xhr.responseText);
+              saveLessonToState(`https://www.youtube.com/embed/${response.id}`);
+            } else {
+              throw new Error('影片傳輸過程中發生錯誤');
+            }
+          };
+
+          xhr.onerror = () => {
+            setErrorMsg('網路斷線或上傳被中斷');
+            setIsUploading(false);
+          };
+
+          xhr.send(selectedFile);
+        } catch (error) {
+          setErrorMsg(error.message);
+          setIsUploading(false);
+        }
+      };
+
+      const saveLessonToState = (finalVideoUrl) => {
+        const newLesson = {
+          id: Date.now().toString(),
+          date: newDate,
+          time: newTime,
+          title: '大提琴常態課',
+          priorityItems: newPriority.split('\n').filter(item => item.trim() !== ''),
+          otherItems: newOther.split('\n').filter(item => item.trim() !== ''),
+          videoUrl: finalVideoUrl
+        };
+        const updatedLessons = [newLesson, ...lessons].sort((a, b) => new Date(b.date) - new Date(a.date));
+        setLessons(updatedLessons);
+        setSelectedLessonId(newLesson.id);
+        setIsAdding(false);
+        resetForm();
+      };
+
+      const resetForm = () => {
+        setNewDate(''); setNewPriority(''); setNewOther(''); 
+        setNewVideoUrl(''); setSelectedFile(null); 
+        setIsUploading(false); setUploadProgress(0); setErrorMsg('');
+      };
+
+      const handleFileChange = (e) => {
+        if (e.target.files && e.target.files.length > 0) {
+          setSelectedFile(e.target.files[0]);
+          setErrorMsg('');
+        }
+      };
+
+      return (
+        <div className="flex h-screen text-slate-800">
+          
+          {/* 手機版遮罩 */}
+          {isSidebarOpen && (
+            <div className="fixed inset-0 bg-black/50 z-20 lg:hidden" onClick={() => setIsSidebarOpen(false)} />
+          )}
+
+          {/* 側邊欄 */}
+          <aside className={`fixed inset-y-0 left-0 z-30 w-72 bg-white shadow-xl border-r border-amber-100 transform transition-transform duration-300 lg:translate-x-0 lg:static lg:w-80 flex flex-col ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+            <div className="p-6 border-b border-amber-100 bg-amber-700 text-white flex justify-between items-center">
+              <div className="flex items-center gap-3">
+                <i className="fa-solid fa-music text-amber-200 text-xl"></i>
+                <h1 className="text-xl font-bold tracking-wider">大提琴課筆記</h1>
+              </div>
+              <button className="lg:hidden text-amber-200" onClick={() => setIsSidebarOpen(false)}>
+                <i className="fa-solid fa-xmark text-2xl"></i>
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-2">
+              {lessons.map(lesson => (
+                <button
+                  key={lesson.id}
+                  onClick={() => { setSelectedLessonId(lesson.id); setIsAdding(false); setIsSidebarOpen(false); }}
+                  className={`w-full text-left p-4 rounded-xl transition-all flex items-center justify-between group ${selectedLessonId === lesson.id && !isAdding ? 'bg-amber-100 text-amber-900 shadow-sm border border-amber-200' : 'hover:bg-amber-50 text-slate-600 border border-transparent'}`}
+                >
+                  <div>
+                    <div className="font-semibold">{lesson.date}</div>
+                    <div className="text-sm opacity-70 flex items-center gap-1 mt-1">
+                      <i className="fa-regular fa-clock text-xs"></i> {lesson.time}
+                    </div>
+                  </div>
+                  <i className={`fa-solid fa-chevron-right ${selectedLessonId === lesson.id && !isAdding ? 'text-amber-600' : 'text-slate-300'}`}></i>
+                </button>
+              ))}
+            </div>
+
+            <div className="p-4 border-t border-amber-100">
+              <button onClick={() => { setIsAdding(true); setIsSidebarOpen(false); resetForm(); }} className="w-full py-3 px-4 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-medium transition-colors flex items-center justify-center gap-2">
+                <i className="fa-solid fa-plus"></i> 新增本週作業
+              </button>
+            </div>
+          </aside>
+
+          {/* 主內容 */}
+          <main className="flex-1 overflow-y-auto h-screen relative bg-amber-50">
+            <header className="lg:hidden bg-amber-700 text-white p-4 sticky top-0 z-10 flex items-center shadow-md">
+              <button onClick={() => setIsSidebarOpen(true)} className="mr-4">
+                <i className="fa-solid fa-bars text-xl"></i>
+              </button>
+              <h2 className="text-lg font-bold">{isAdding ? '新增作業' : selectedLesson?.date + ' 課程筆記'}</h2>
+            </header>
+
+            <div className="p-6 lg:p-12 max-w-4xl mx-auto">
+              {isAdding ? (
+                <div className="bg-white rounded-2xl shadow-sm border border-amber-100 overflow-hidden">
+                  <div className="bg-amber-50 p-6 border-b border-amber-100">
+                    <h2 className="text-2xl font-bold text-amber-900 flex items-center gap-2">
+                      <i className="fa-solid fa-plus text-amber-600"></i> 新增每週筆記
+                    </h2>
+                  </div>
+                  
+                  <form onSubmit={handleAddLesson} className="p-6 space-y-6">
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-1">下次上課日期</label>
+                        <input required type="date" value={newDate} onChange={e => setNewDate(e.target.value)} disabled={isUploading} className="w-full p-3 rounded-lg border border-slate-200 focus:ring-2 focus:ring-amber-500 disabled:opacity-50 outline-none" />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-1">上課時間</label>
+                        <input required type="time" value={newTime} onChange={e => setNewTime(e.target.value)} disabled={isUploading} className="w-full p-3 rounded-lg border border-slate-200 focus:ring-2 focus:ring-amber-500 disabled:opacity-50 outline-none" />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">🌟 優先練好 (一行一項)</label>
+                      <textarea required rows="3" value={newPriority} onChange={e => setNewPriority(e.target.value)} disabled={isUploading} className="w-full p-3 rounded-lg border border-slate-200 focus:ring-2 focus:ring-amber-500 outline-none disabled:opacity-50" />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">📝 其他進度 (一行一項)</label>
+                      <textarea rows="2" value={newOther} onChange={e => setNewOther(e.target.value)} disabled={isUploading} className="w-full p-3 rounded-lg border border-slate-200 focus:ring-2 focus:ring-amber-500 outline-none disabled:opacity-50" />
+                    </div>
+
+                    <div className="border border-slate-200 rounded-xl overflow-hidden">
+                      <div className="flex border-b border-slate-200 bg-slate-50">
+                        <button type="button" onClick={() => setVideoMethod('link')} disabled={isUploading} className={`flex-1 py-3 px-4 text-sm font-medium flex items-center justify-center gap-2 transition-colors ${videoMethod === 'link' ? 'bg-white text-amber-600 border-b-2 border-amber-600' : 'text-slate-500'}`}>
+                          <i className="fa-solid fa-link"></i> 貼上 YouTube 連結
+                        </button>
+                        <button type="button" onClick={() => setVideoMethod('upload')} disabled={isUploading} className={`flex-1 py-3 px-4 text-sm font-medium flex items-center justify-center gap-2 transition-colors ${videoMethod === 'upload' ? 'bg-white text-amber-600 border-b-2 border-amber-600' : 'text-slate-500'}`}>
+                          <i className="fa-solid fa-cloud-arrow-up"></i> 授權直接上傳影片
+                        </button>
+                      </div>
+
+                      <div className="p-5">
+                        {videoMethod === 'link' ? (
+                          <input type="url" value={newVideoUrl} onChange={e => setNewVideoUrl(e.target.value)} disabled={isUploading} placeholder="https://www.youtube.com/watch?v=..." className="w-full p-3 rounded-lg border border-slate-200 focus:ring-2 focus:ring-amber-500 outline-none disabled:opacity-50" />
+                        ) : (
+                          <div className="space-y-4">
+                            {!selectedFile ? (
+                              <div onClick={() => !isUploading && fileInputRef.current?.click()} className="border-2 border-dashed border-slate-300 rounded-xl p-8 flex flex-col items-center justify-center text-slate-500 hover:border-amber-400 hover:bg-amber-50 cursor-pointer transition-colors">
+                                <i className="fa-solid fa-file-video text-4xl mb-2 text-slate-400"></i>
+                                <p className="font-medium">點擊選擇影片檔案</p>
+                                <p className="text-xs mt-1">儲存時將請求 Google 登入並上傳至 YouTube</p>
+                              </div>
+                            ) : (
+                              <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-center justify-between">
+                                <div className="flex items-center gap-3 overflow-hidden">
+                                  <div className="bg-amber-100 p-2 rounded-lg text-amber-700">
+                                    <i className="fa-solid fa-file-video text-xl"></i>
+                                  </div>
+                                  <div className="truncate">
+                                    <p className="text-sm font-medium text-slate-700 truncate">{selectedFile.name}</p>
+                                    <p className="text-xs text-slate-500">{(selectedFile.size / (1024 * 1024)).toFixed(2)} MB</p>
+                                  </div>
+                                </div>
+                                {!isUploading && (
+                                  <button type="button" onClick={() => setSelectedFile(null)} className="text-slate-400 hover:text-red-500 p-2"><i className="fa-solid fa-xmark text-xl"></i></button>
+                                )}
+                              </div>
+                            )}
+                            <input type="file" accept="video/*" className="hidden" ref={fileInputRef} onChange={handleFileChange} />
+
+                            {errorMsg && (
+                              <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-sm flex items-start gap-2">
+                                <i className="fa-solid fa-circle-exclamation mt-0.5"></i> {errorMsg}
+                              </div>
+                            )}
+
+                            {isUploading && (
+                              <div className="space-y-2">
+                                <div className="flex justify-between text-xs font-medium text-slate-600">
+                                  <span className="flex items-center gap-1"><i className="fa-solid fa-spinner fa-spin"></i> {uploadStatusMsg}</span>
+                                  <span>{uploadProgress}%</span>
+                                </div>
+                                <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
+                                  <div className="bg-amber-500 h-2 rounded-full transition-all duration-300 ease-out" style={{ width: `${uploadProgress}%` }}></div>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex gap-3 pt-4 border-t border-slate-100">
+                      <button type="submit" disabled={isUploading} className="flex-1 bg-amber-600 hover:bg-amber-700 disabled:bg-amber-400 text-white py-3 rounded-xl font-medium transition-colors flex justify-center items-center gap-2">
+                        {isUploading ? <><i className="fa-solid fa-spinner fa-spin"></i> 處理中</> : '儲存筆記並上傳'}
+                      </button>
+                      <button type="button" onClick={() => setIsAdding(false)} disabled={isUploading} className="px-6 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 py-3 rounded-xl font-medium transition-colors">
+                        取消
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              ) : selectedLesson ? (
+                <div className="space-y-6">
+                  <div className="bg-white rounded-2xl p-6 shadow-sm border border-amber-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div>
+                      <h2 className="text-2xl font-bold text-slate-800">下次上課時間</h2>
+                      <div className="flex items-center gap-4 mt-2 text-amber-700 font-medium">
+                        <span className="flex items-center gap-1.5 bg-amber-50 px-3 py-1.5 rounded-lg"><i className="fa-regular fa-calendar"></i> {selectedLesson.date}</span>
+                        <span className="flex items-center gap-1.5 bg-amber-50 px-3 py-1.5 rounded-lg"><i className="fa-regular fa-clock"></i> {selectedLesson.time}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid lg:grid-cols-2 gap-6">
+                    <div className="space-y-6">
+                      <div className="bg-white rounded-2xl p-6 shadow-sm border border-red-100 relative overflow-hidden">
+                        <div className="absolute top-0 left-0 w-1 h-full bg-red-400"></div>
+                        <h3 className="text-lg font-bold text-red-700 flex items-center gap-2 mb-4"><i className="fa-regular fa-circle-check text-xl"></i> 優先練好</h3>
+                        <ul className="space-y-3">
+                          {selectedLesson.priorityItems.map((item, idx) => (
+                            <li key={idx} className="flex items-start gap-3">
+                              <span className="flex-shrink-0 w-6 h-6 rounded-full bg-red-50 text-red-600 flex items-center justify-center text-sm font-bold mt-0.5">{idx + 1}</span>
+                              <span className="text-slate-700 leading-relaxed">{item}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+
+                      {selectedLesson.otherItems && selectedLesson.otherItems.length > 0 && (
+                        <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200 relative overflow-hidden">
+                          <div className="absolute top-0 left-0 w-1 h-full bg-slate-300"></div>
+                          <h3 className="text-lg font-bold text-slate-700 flex items-center gap-2 mb-4"><i className="fa-regular fa-circle text-lg"></i> 延伸 / 其他進度</h3>
+                          <ul className="space-y-3">
+                            {selectedLesson.otherItems.map((item, idx) => (
+                              <li key={idx} className="flex items-start gap-3">
+                                <span className="flex-shrink-0 w-6 h-6 flex items-center justify-center text-sm text-slate-400 font-bold mt-0.5">{selectedLesson.priorityItems.length + idx + 1}.</span>
+                                <span className="text-slate-600 leading-relaxed">{item}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+
+                    <div>
+                      <div className="bg-white rounded-2xl shadow-sm border border-amber-100 overflow-hidden sticky top-6">
+                        <div className="p-4 bg-amber-50 border-b border-amber-100 flex items-center gap-2">
+                          <i className="fa-regular fa-circle-play text-amber-600 text-xl"></i>
+                          <h3 className="font-bold text-amber-900">本週老師示範影片</h3>
+                        </div>
+                        {selectedLesson.videoUrl ? (
+                          <div className="aspect-video bg-slate-900 w-full relative">
+                            <iframe src={selectedLesson.videoUrl} className="absolute inset-0 w-full h-full" allowFullScreen></iframe>
+                          </div>
+                        ) : (
+                          <div className="aspect-video bg-slate-50 flex flex-col items-center justify-center text-slate-400 p-6 text-center">
+                            <i className="fa-regular fa-circle-play text-5xl mb-2 opacity-50"></i>
+                            <p>本週沒有上傳影片</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </main>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
+
